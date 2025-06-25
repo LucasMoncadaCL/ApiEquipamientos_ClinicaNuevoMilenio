@@ -25,7 +25,8 @@ public class EquipamientoService {
     private final DetalleEquipamientoRepository detalleRepository;
     private final WebClient pabellonWebClient;
 
-    // --- Métodos de Catálogo (sin cambios) ---
+    // --- Métodos de Catálogo ---
+
     @Transactional
     public EquipamientoDTO crearTipoEquipamiento(EquipamientoCreacionDTO dto) {
         Equipamiento equipamiento = new Equipamiento();
@@ -43,14 +44,41 @@ public class EquipamientoService {
                 .collect(Collectors.toList());
     }
 
-    // --- Métodos de Inventario (CON MEJORAS) ---
+    /**
+     * Obtiene los detalles de un único equipamiento por su ID.
+     * Utilizado por EquipamientoClientService.obtenerEquipamientoPorId.
+     * @param equipamientoId El ID del equipamiento a buscar.
+     * @return El DTO del equipamiento o null si no se encuentra.
+     */
+    public EquipamientoDTO obtenerEquipamientoPorId(Integer equipamientoId) {
+        return equipamientoRepository.findById(equipamientoId)
+                .map(this::convertirAEquipamientoDTO)
+                .orElse(null); // Retorna null si no se encuentra, coherente con WebClient
+    }
+
+    /**
+     * Obtiene una lista de tipos de equipamiento por una lista de sus IDs.
+     * Crucial para la optimización N+1 en el microservicio `solicitudservicio`.
+     * @param ids Lista de IDs de equipamiento a buscar.
+     * @return Lista de DTOs de equipamiento. Retorna una lista vacía si no se encuentran coincidencias o si la lista de IDs es nula/vacía.
+     */
+    public List<EquipamientoDTO> obtenerTiposEquipamientoPorIds(List<Integer> ids) {
+        if (ids == null || ids.isEmpty()) {
+            return List.of(); // Retorna una lista vacía si no hay IDs
+        }
+        return equipamientoRepository.findAllById(ids).stream()
+                .map(this::convertirAEquipamientoDTO)
+                .collect(Collectors.toList());
+    }
+
+    // --- Métodos de Inventario ---
 
     @Transactional
     public DetalleEquipamientoRespuestaDTO agregarStock(DetalleEquipamientoCreacionDTO dto) {
         Equipamiento equipamiento = equipamientoRepository.findById(dto.getEquipamientoId())
                 .orElseThrow(() -> new EntityNotFoundException("Equipamiento no encontrado con ID: " + dto.getEquipamientoId()));
 
-        // **REGLA #2 AÑADIDA: Validar estado del equipo**
+        // Regla de Negocio: Validar estado del equipo para añadir stock
         if (!"Operativo".equals(equipamiento.getEstado())) {
             throw new IllegalStateException("No se puede gestionar stock de un equipo que no está 'Operativo'.");
         }
@@ -88,26 +116,16 @@ public class EquipamientoService {
                 .collect(Collectors.toList());
     }
 
-    // --- NUEVOS MÉTODOS CON LÓGICA DE NEGOCIO ---
-
-    /**
-     * **REGLA #3: Consulta el stock de un equipo específico en un pabellón.**
-     */
     @Transactional(readOnly = true)
     public DetalleEquipamientoRespuestaDTO obtenerDetalleEspecifico(Integer pabellonId, Integer equipamientoId) {
         validarPabellon(pabellonId); // Validamos que el pabellón exista
         DetalleEquipamiento detalle = detalleRepository.findByEquipamientoIdAndPabellonId(equipamientoId, pabellonId)
                 .orElseThrow(() -> new EntityNotFoundException("No se encontró stock para el equipo ID " + equipamientoId + " en el pabellón ID " + pabellonId));
 
-        // Para enriquecer la respuesta, necesitamos el nombre del pabellón.
-        // Podríamos optimizarlo para no llamarlo de nuevo, pero por claridad lo dejamos así.
-        PabellonRespuestaDTO pabellonDTO = validarPabellon(pabellonId);
+        PabellonRespuestaDTO pabellonDTO = validarPabellon(pabellonId); // Obtenemos el nombre del pabellón para enriquecer la respuesta
         return convertirADetalleRespuestaDTO(detalle, pabellonDTO.getNombre());
     }
 
-    /**
-     * **REGLA #4: Consume (reduce) el stock de un ítem de inventario.**
-     */
     @Transactional
     public DetalleEquipamientoRespuestaDTO consumirStock(ConsumoStockDTO dto) {
         DetalleEquipamiento detalle = detalleRepository.findById(dto.getDetalleId())
@@ -121,10 +139,10 @@ public class EquipamientoService {
         detalle.setCantidad(nuevaCantidad);
         detalle.setFechaActualizacion(LocalDate.now());
 
-        // Alerta si el stock cae por debajo del mínimo
+        // Lógica de Alerta: si el stock cae por debajo del mínimo
         if (nuevaCantidad < detalle.getStockMinimo()) {
             System.out.println("ALERTA: Stock para '" + detalle.getEquipamiento().getNombre() + "' en pabellón ID " + detalle.getPabellonId() + " ha caído por debajo del mínimo.");
-            // Aquí en el futuro podría ir una notificación
+            // Aquí en una aplicación real, se podría enviar una notificación, email, etc.
         }
 
         DetalleEquipamiento guardado = detalleRepository.save(detalle);
@@ -135,6 +153,10 @@ public class EquipamientoService {
 
     // --- Métodos Privados de Ayuda ---
 
+    /**
+     * Valida la existencia de un pabellón consultando el servicio de pabellones.
+     * Lanza EntityNotFoundException si el pabellón no existe o RuntimeException si hay un error de comunicación.
+     */
     private PabellonRespuestaDTO validarPabellon(Integer pabellonId) {
         try {
             return pabellonWebClient.get()
@@ -145,10 +167,13 @@ public class EquipamientoService {
         } catch (WebClientResponseException.NotFound ex) {
             throw new EntityNotFoundException("El pabellón con ID " + pabellonId + " no existe en el servicio de pabellones.");
         } catch (Exception ex) {
-            throw new RuntimeException("Error de comunicación con el servicio de pabellones.");
+            throw new RuntimeException("Error de comunicación con el servicio de pabellones: " + ex.getMessage());
         }
     }
 
+    /**
+     * Convierte una entidad Equipamiento a un EquipamientoDTO.
+     */
     private EquipamientoDTO convertirAEquipamientoDTO(Equipamiento equipamiento) {
         EquipamientoDTO dto = new EquipamientoDTO();
         dto.setId(equipamiento.getId());
@@ -159,6 +184,10 @@ public class EquipamientoService {
         return dto;
     }
 
+    /**
+     * Convierte una entidad DetalleEquipamiento a un DetalleEquipamientoRespuestaDTO,
+     * enriqueciendo con el nombre del pabellón.
+     */
     private DetalleEquipamientoRespuestaDTO convertirADetalleRespuestaDTO(DetalleEquipamiento detalle, String pabellonNombre) {
         return DetalleEquipamientoRespuestaDTO.builder()
                 .id(detalle.getId())
